@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import nodemailer from "nodemailer";
 import { NextResponse } from "next/server";
 
 export const maxDuration = 60;
@@ -6,23 +7,21 @@ export const maxDuration = 60;
 const redis = Redis.fromEnv();
 
 async function sendEmail(to: string, subject: string, html: string): Promise<void> {
-  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-    method: "POST",
-    headers: {
-      "api-key": process.env.BREVO_API_KEY!,
-      "content-type": "application/json",
+  const transporter = nodemailer.createTransport({
+    host: "smtp.zoho.in",
+    port: 465,
+    secure: true,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
     },
-    body: JSON.stringify({
-      sender: { name: "3minbite", email: process.env.BREVO_SENDER_EMAIL },
-      to: [{ email: to }],
-      subject,
-      htmlContent: html,
-    }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Brevo error ${res.status}: ${text}`);
-  }
+  await transporter.sendMail({
+    from: `"3minbite" <${process.env.SMTP_USER}>`,
+    to,
+    subject,
+    html,
+  });
 }
 
 interface Article {
