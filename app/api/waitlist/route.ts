@@ -1,27 +1,20 @@
 import { Redis } from "@upstash/redis";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { NextResponse } from "next/server";
 
 export const maxDuration = 60;
 
 const redis = Redis.fromEnv();
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 async function sendEmail(to: string, subject: string, html: string): Promise<void> {
-  const transporter = nodemailer.createTransport({
-    host: "smtp.zoho.in",
-    port: 465,
-    secure: true,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-  await transporter.sendMail({
-    from: `"3minbite" <${process.env.SMTP_USER}>`,
+  const { error } = await resend.emails.send({
+    from: "3minbite <hello@3minbite.is-a.dev>",
     to,
     subject,
     html,
   });
+  if (error) throw new Error(error.message);
 }
 
 interface Article {
