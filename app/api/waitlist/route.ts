@@ -25,12 +25,13 @@ interface Article {
 }
 
 const INDUSTRY_SYNONYMS: Record<string, string[]> = {
-  fintech: ["finance", "banking", "payments", "digital lending"],
+  fintech: ["finance", "banking", "payments", "digital lending", "neobank", "fintechs"],
+  finance: ["fintech", "banking", "financial services", "finances"],
   pharma: ["pharmaceutical", "drug", "healthcare", "biotech"],
   pharmaceutical: ["pharma", "drug", "healthcare", "biotech"],
-  edtech: ["education", "e-learning"],
+  edtech: ["education", "e-learning", "education technology company"],
   healthtech: ["healthcare", "digital health", "medtech"],
-  agritech: ["agriculture", "farming"],
+  agritech: ["agriculture", "farming", "agri tech"],
   saas: ["software", "cloud", "b2b software"],
   d2c: ["direct to consumer", "consumer brand", "ecommerce"],
   ecommerce: ["online retail", "e-commerce"],
@@ -54,26 +55,34 @@ const INDUSTRY_SYNONYMS: Record<string, string[]> = {
   traveltech: ["travel", "tourism"],
   manufacturing: ["industrial"],
   retail: ["consumer goods"],
+  beauty: ["cosmetics", "skincare", "salon", "grooming"],
+  wellness: ["fitness", "spa", "self-care"],
+  fashion: ["apparel", "clothing"],
+  grocery: ["quick commerce", "online grocery"],
 };
 
-const DESCRIPTION_STOPWORDS = new Set([
-  "a", "an", "the", "of", "for", "in", "on", "and", "or", "to", "i", "am", "is", "are", "we",
-  "our", "my", "this", "that", "with", "making", "work", "working", "related", "company",
-  "business", "team", "stuff",
-]);
+const WORD_STOPWORDS = new Set(["and", "the", "of", "for", "in", "on", "at", "a", "an", "to", "your", "you"]);
 
-function descriptionKeywords(description: string): string[] {
-  return description
+// Splits industry text into meaningful words so multi-word inputs like
+// "Beauty & Wellness" also match on "beauty" and "wellness" individually.
+function significantWords(text: string): string[] {
+  return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 3 && !DESCRIPTION_STOPWORDS.has(w))
-    .slice(0, 3);
+    .filter((w) => w.length >= 3 && !WORD_STOPWORDS.has(w));
 }
 
-function buildSearchTerms(industry: string, description: string): string[] {
-  const synonyms = INDUSTRY_SYNONYMS[industry.toLowerCase().trim()] || [];
-  const raw = [industry, ...synonyms, ...descriptionKeywords(description)];
+// Only the industry name, its component words, and curated synonyms are ever
+// used to judge relevance. Free-text descriptions are intentionally excluded —
+// generic words like "delivered" or "credit" match unrelated articles by
+// coincidence, which is what caused irrelevant news in earlier versions.
+function buildSearchTerms(industry: string): string[] {
+  const industryLower = industry.toLowerCase().trim();
+  const words = significantWords(industry);
+  const synonyms = [industryLower, ...words].flatMap((w) => INDUSTRY_SYNONYMS[w] || []);
+  const raw = [industry, ...words, ...synonyms];
+
   const seen = new Set<string>();
   const terms: string[] = [];
   for (const t of raw) {
@@ -90,66 +99,84 @@ function orGroup(terms: string[]): string {
   return `(${quoted.join(" OR ")})`;
 }
 
-function buildQuery(terms: string[], india: boolean, extra?: string): string {
-  const parts = [`+${orGroup(terms)}`];
-  if (india) parts.push("+India");
-  if (extra) parts.push(extra);
-  return encodeURIComponent(parts.join(" "));
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function fetchNews(industry: string, description: string) {
+// Whole-word match only — a substring check would let "card" match inside
+// "discard" or "credited", which is exactly what caused off-topic articles.
+function containsTerm(text: string, term: string): boolean {
+  return new RegExp(`\\b${escapeRegex(term.toLowerCase())}\\b`, "i").test(text);
+}
+
+async function fetchNews(industry: string) {
   const key = process.env.NEWS_API_KEY;
   const base = "https://newsapi.org/v2";
-  const terms = buildSearchTerms(industry, description);
-  const termsLower = terms.map((t) => t.toLowerCase());
+  const terms = buildSearchTerms(industry);
+  const group = orGroup(terms);
 
-  const runTier = async (days: number, india: boolean) => {
+  const fetchCandidates = async (days: number, india: boolean): Promise<Article[]> => {
     const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    const urls = [
-      `${base}/everything?q=${buildQuery(terms, india)}&language=en&sortBy=publishedAt&from=${from}&pageSize=8&apiKey=${key}`,
-      `${base}/everything?q=${buildQuery(terms, india, "(funding OR launch OR hiring)")}&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`,
-      `${base}/everything?q=${buildQuery(terms, india, "(acquisition OR merger OR IPO OR revenue)")}&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`,
-    ];
-    const [r1, r2, r3] = await Promise.all(urls.map((u) => fetch(u)));
-    return Promise.all([r1.json(), r2.json(), r3.json()]);
+    const rawQuery = india ? `${group} AND India` : group;
+    const url = `${base}/everything?q=${encodeURIComponent(rawQuery)}&language=en&sortBy=publishedAt&from=${from}&pageSize=40&apiKey=${key}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return (data.articles || []) as Article[];
   };
 
   const relevant = (a: Article) => {
     if (!a.title || a.title === "[Removed]" || !a.url) return false;
-    const text = `${a.title} ${a.description || ""}`.toLowerCase();
-    return termsLower.some((t) => text.includes(t));
+    const text = `${a.title} ${a.description || ""}`;
+    return terms.some((t) => containsTerm(text, t));
   };
 
-  const countRelevant = (results: { articles?: Article[] }[]) =>
-    results.reduce((sum, d) => sum + (d.articles || []).filter(relevant).length, 0);
-
-  // Tier 1: India-only, last 48 hours (freshest, most locally relevant)
-  let [d1, d2, d3] = await runTier(2, true);
-  // Tier 2: if too little turned up, widen to global sources and a 5-day window
-  if (countRelevant([d1, d2, d3]) < 2) {
-    [d1, d2, d3] = await runTier(5, false);
+  // Tier 1: India-only, last 2 days (freshest, most locally relevant)
+  let candidates = (await fetchCandidates(2, true)).filter(relevant);
+  // Tier 2: if too little turned up, widen to global sources and a 6-day window
+  if (candidates.length < 4) {
+    candidates = (await fetchCandidates(6, false)).filter(relevant);
   }
 
   const seenUrls = new Set<string>();
   const seenTitles = new Set<string>();
+  const unique: Article[] = [];
+  for (const a of candidates) {
+    const titleKey = a.title.slice(0, 60).toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenUrls.has(a.url) || seenTitles.has(titleKey)) continue;
+    seenUrls.add(a.url);
+    seenTitles.add(titleKey);
+    unique.push(a);
+  }
 
-  const dedupe = (list: Article[]) => {
-    const result: Article[] = [];
-    for (const a of (list || []).filter(relevant)) {
-      const titleKey = a.title.slice(0, 60).toLowerCase().replace(/\s+/g, " ").trim();
-      if (seenUrls.has(a.url) || seenTitles.has(titleKey)) continue;
-      seenUrls.add(a.url);
-      seenTitles.add(titleKey);
-      result.push(a);
+  // Every article in `unique` already passed the relevance check above, so
+  // categorizing them below can only ever sort already-relevant news — it
+  // can never introduce an off-topic article into any bucket.
+  const isFinancial = (a: Article) =>
+    /\b(fund(ing|ed|s)?|raise[sd]?|acquisitions?|acquir(e|ed|es|ing)|merger|ipo|revenue|valuation|invest(ment|s|or)?)\b/i.test(
+      `${a.title} ${a.description || ""}`
+    );
+  const isCompetitor = (a: Article) =>
+    /\b(launch(es|ed|ing)?|hir(e|ed|es|ing)|product|unveil(s|ed|ing)?|partnership|expand(s|ed|ing)?)\b/i.test(
+      `${a.title} ${a.description || ""}`
+    );
+
+  const used = new Set<string>();
+  const take = (predicate: (a: Article) => boolean, n: number): Article[] => {
+    const picked: Article[] = [];
+    for (const a of unique) {
+      if (picked.length >= n) break;
+      if (used.has(a.url) || !predicate(a)) continue;
+      used.add(a.url);
+      picked.push(a);
     }
-    return result.slice(0, 3);
+    return picked;
   };
 
-  return {
-    general: dedupe(d1.articles),
-    competitor: dedupe(d2.articles),
-    financial: dedupe(d3.articles),
-  };
+  const financial = take(isFinancial, 3);
+  const competitor = take(isCompetitor, 3);
+  const general = take(() => true, 3);
+
+  return { general, competitor, financial };
 }
 
 // Strip source prefixes like "ETtech Deals Digest: " or "Mint | " from titles
@@ -333,7 +360,7 @@ export async function POST(req: Request) {
   });
 
   try {
-    const news = await fetchNews(industry.trim(), (description || "").trim());
+    const news = await fetchNews(industry.trim());
     const subject = generateSubject(industry.trim(), news);
     const html = buildEmailHtml(name.trim(), industry.trim(), (description || "").trim(), news);
     await sendEmail(normalized, subject, html);
