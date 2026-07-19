@@ -28,23 +28,26 @@ async function fetchNews(industry: string) {
   const key = process.env.NEWS_API_KEY;
   const base = "https://newsapi.org/v2";
   const from = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString().split("T")[0];
-  const q = encodeURIComponent(industry);
+  const requiredIndustry = encodeURIComponent(`+"${industry}"`);
 
   const [r1, r2, r3] = await Promise.all([
-    fetch(`${base}/everything?q=${q}+India&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`),
-    fetch(`${base}/everything?q=${q}+%28funding+OR+launch+OR+hiring%29+India&language=en&sortBy=publishedAt&from=${from}&pageSize=5&apiKey=${key}`),
-    fetch(`${base}/everything?q=${q}+%28acquisition+OR+merger+OR+IPO+OR+revenue%29+India&language=en&sortBy=publishedAt&from=${from}&pageSize=5&apiKey=${key}`),
+    fetch(`${base}/everything?q=${requiredIndustry}+India&language=en&sortBy=publishedAt&from=${from}&pageSize=8&apiKey=${key}`),
+    fetch(`${base}/everything?q=${requiredIndustry}+%28funding+OR+launch+OR+hiring%29+India&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`),
+    fetch(`${base}/everything?q=${requiredIndustry}+%28acquisition+OR+merger+OR+IPO+OR+revenue%29+India&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`),
   ]);
 
   const [d1, d2, d3] = await Promise.all([r1.json(), r2.json(), r3.json()]);
 
   const seenUrls = new Set<string>();
   const seenTitles = new Set<string>();
+  const industryLower = industry.toLowerCase();
 
   const dedupe = (list: Article[]) => {
     const result: Article[] = [];
     for (const a of (list || [])) {
       if (!a.title || a.title === "[Removed]" || !a.url) continue;
+      const text = `${a.title} ${a.description || ""}`.toLowerCase();
+      if (!text.includes(industryLower)) continue;
       const titleKey = a.title.slice(0, 60).toLowerCase().replace(/\s+/g, " ").trim();
       if (seenUrls.has(a.url) || seenTitles.has(titleKey)) continue;
       seenUrls.add(a.url);
@@ -53,6 +56,8 @@ async function fetchNews(industry: string) {
     }
     return result.slice(0, 3);
   };
+
+ 
 
   return {
     general: dedupe(d1.articles),
