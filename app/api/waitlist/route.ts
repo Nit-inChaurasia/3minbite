@@ -9,7 +9,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 async function sendEmail(to: string, subject: string, html: string): Promise<void> {
   const { error } = await resend.emails.send({
-    from: "3minbite <hello@3minbite.is-a.dev>",
+    from: "3minbite <hello@3minbite.online>",
     to,
     subject,
     html,
