@@ -24,30 +24,118 @@ interface Article {
   source: { name: string };
 }
 
-async function fetchNews(industry: string) {
+const INDUSTRY_SYNONYMS: Record<string, string[]> = {
+  fintech: ["finance", "banking", "payments", "digital lending"],
+  pharma: ["pharmaceutical", "drug", "healthcare", "biotech"],
+  pharmaceutical: ["pharma", "drug", "healthcare", "biotech"],
+  edtech: ["education", "e-learning"],
+  healthtech: ["healthcare", "digital health", "medtech"],
+  agritech: ["agriculture", "farming"],
+  saas: ["software", "cloud", "b2b software"],
+  d2c: ["direct to consumer", "consumer brand", "ecommerce"],
+  ecommerce: ["online retail", "e-commerce"],
+  "e-commerce": ["online retail", "ecommerce"],
+  logistics: ["supply chain", "delivery"],
+  insurtech: ["insurance"],
+  legaltech: ["legal"],
+  hrtech: ["human resources", "recruitment"],
+  proptech: ["real estate", "property"],
+  "real estate": ["property", "proptech"],
+  foodtech: ["food delivery", "restaurant tech"],
+  gaming: ["esports", "video games"],
+  media: ["entertainment", "streaming"],
+  mobility: ["automotive", "electric vehicle"],
+  automotive: ["mobility", "electric vehicle"],
+  energy: ["renewable energy", "clean energy", "solar"],
+  ai: ["artificial intelligence", "machine learning"],
+  "artificial intelligence": ["ai", "machine learning"],
+  crypto: ["cryptocurrency", "blockchain"],
+  web3: ["blockchain", "cryptocurrency"],
+  traveltech: ["travel", "tourism"],
+  manufacturing: ["industrial"],
+  retail: ["consumer goods"],
+};
+
+const DESCRIPTION_STOPWORDS = new Set([
+  "a", "an", "the", "of", "for", "in", "on", "and", "or", "to", "i", "am", "is", "are", "we",
+  "our", "my", "this", "that", "with", "making", "work", "working", "related", "company",
+  "business", "team", "stuff",
+]);
+
+function descriptionKeywords(description: string): string[] {
+  return description
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !DESCRIPTION_STOPWORDS.has(w))
+    .slice(0, 3);
+}
+
+function buildSearchTerms(industry: string, description: string): string[] {
+  const synonyms = INDUSTRY_SYNONYMS[industry.toLowerCase().trim()] || [];
+  const raw = [industry, ...synonyms, ...descriptionKeywords(description)];
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const t of raw) {
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push(t);
+  }
+  return terms;
+}
+
+function orGroup(terms: string[]): string {
+  const quoted = terms.map((t) => (t.includes(" ") ? `"${t}"` : t));
+  return `(${quoted.join(" OR ")})`;
+}
+
+function buildQuery(terms: string[], india: boolean, extra?: string): string {
+  const parts = [`+${orGroup(terms)}`];
+  if (india) parts.push("+India");
+  if (extra) parts.push(extra);
+  return encodeURIComponent(parts.join(" "));
+}
+
+async function fetchNews(industry: string, description: string) {
   const key = process.env.NEWS_API_KEY;
   const base = "https://newsapi.org/v2";
-  const from = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString().split("T")[0];
-  const requiredIndustry = encodeURIComponent(`+"${industry}"`);
+  const terms = buildSearchTerms(industry, description);
+  const termsLower = terms.map((t) => t.toLowerCase());
 
-  const [r1, r2, r3] = await Promise.all([
-    fetch(`${base}/everything?q=${requiredIndustry}+India&language=en&sortBy=publishedAt&from=${from}&pageSize=8&apiKey=${key}`),
-    fetch(`${base}/everything?q=${requiredIndustry}+%28funding+OR+launch+OR+hiring%29+India&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`),
-    fetch(`${base}/everything?q=${requiredIndustry}+%28acquisition+OR+merger+OR+IPO+OR+revenue%29+India&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`),
-  ]);
+  const runTier = async (days: number, india: boolean) => {
+    const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const urls = [
+      `${base}/everything?q=${buildQuery(terms, india)}&language=en&sortBy=publishedAt&from=${from}&pageSize=8&apiKey=${key}`,
+      `${base}/everything?q=${buildQuery(terms, india, "(funding OR launch OR hiring)")}&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`,
+      `${base}/everything?q=${buildQuery(terms, india, "(acquisition OR merger OR IPO OR revenue)")}&language=en&sortBy=publishedAt&from=${from}&pageSize=6&apiKey=${key}`,
+    ];
+    const [r1, r2, r3] = await Promise.all(urls.map((u) => fetch(u)));
+    return Promise.all([r1.json(), r2.json(), r3.json()]);
+  };
 
-  const [d1, d2, d3] = await Promise.all([r1.json(), r2.json(), r3.json()]);
+  const relevant = (a: Article) => {
+    if (!a.title || a.title === "[Removed]" || !a.url) return false;
+    const text = `${a.title} ${a.description || ""}`.toLowerCase();
+    return termsLower.some((t) => text.includes(t));
+  };
+
+  const countRelevant = (results: { articles?: Article[] }[]) =>
+    results.reduce((sum, d) => sum + (d.articles || []).filter(relevant).length, 0);
+
+  // Tier 1: India-only, last 48 hours (freshest, most locally relevant)
+  let [d1, d2, d3] = await runTier(2, true);
+  // Tier 2: if too little turned up, widen to global sources and a 5-day window
+  if (countRelevant([d1, d2, d3]) < 2) {
+    [d1, d2, d3] = await runTier(5, false);
+  }
 
   const seenUrls = new Set<string>();
   const seenTitles = new Set<string>();
-  const industryLower = industry.toLowerCase();
 
   const dedupe = (list: Article[]) => {
     const result: Article[] = [];
-    for (const a of (list || [])) {
-      if (!a.title || a.title === "[Removed]" || !a.url) continue;
-      const text = `${a.title} ${a.description || ""}`.toLowerCase();
-      if (!text.includes(industryLower)) continue;
+    for (const a of (list || []).filter(relevant)) {
       const titleKey = a.title.slice(0, 60).toLowerCase().replace(/\s+/g, " ").trim();
       if (seenUrls.has(a.url) || seenTitles.has(titleKey)) continue;
       seenUrls.add(a.url);
@@ -56,8 +144,6 @@ async function fetchNews(industry: string) {
     }
     return result.slice(0, 3);
   };
-
- 
 
   return {
     general: dedupe(d1.articles),
@@ -247,7 +333,7 @@ export async function POST(req: Request) {
   });
 
   try {
-    const news = await fetchNews(industry.trim());
+    const news = await fetchNews(industry.trim(), (description || "").trim());
     const subject = generateSubject(industry.trim(), news);
     const html = buildEmailHtml(name.trim(), industry.trim(), (description || "").trim(), news);
     await sendEmail(normalized, subject, html);
