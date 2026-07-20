@@ -25,13 +25,13 @@ interface Article {
 }
 
 const INDUSTRY_SYNONYMS: Record<string, string[]> = {
-  fintech: ["finance", "banking", "payments", "digital lending", "neobank", "fintechs"],
-  finance: ["fintech", "banking", "financial services", "finances"],
+  fintech: ["finance", "banking", "payments", "digital lending", "neobank"],
+  finance: ["fintech", "banking", "financial services"],
   pharma: ["pharmaceutical", "drug", "healthcare", "biotech"],
   pharmaceutical: ["pharma", "drug", "healthcare", "biotech"],
-  edtech: ["education", "e-learning", "education technology company"],
+  edtech: ["education", "e-learning"],
   healthtech: ["healthcare", "digital health", "medtech"],
-  agritech: ["agriculture", "farming", "agri tech"],
+  agritech: ["agriculture", "farming"],
   saas: ["software", "cloud", "b2b software"],
   d2c: ["direct to consumer", "consumer brand", "ecommerce"],
   ecommerce: ["online retail", "e-commerce"],
@@ -113,14 +113,22 @@ async function fetchNews(industry: string) {
   const key = process.env.NEWS_API_KEY;
   const base = "https://newsapi.org/v2";
   const terms = buildSearchTerms(industry);
-  const group = orGroup(terms);
+  // Plain OR group only — quotes for exact phrases and " OR " between terms
+  // are the only NewsAPI query features this relies on. No +/AND operators:
+  // whether NewsAPI actually honors those isn't something to gamble on, and
+  // this code enforces relevance itself in `relevant()` below regardless of
+  // how loosely or strictly NewsAPI matches the query.
+  const q = encodeURIComponent(orGroup(terms));
 
-  const fetchCandidates = async (days: number, india: boolean): Promise<Article[]> => {
+  const fetchCandidates = async (days: number): Promise<Article[]> => {
     const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    const rawQuery = india ? `${group} AND India` : group;
-    const url = `${base}/everything?q=${encodeURIComponent(rawQuery)}&language=en&sortBy=publishedAt&from=${from}&pageSize=40&apiKey=${key}`;
+    const url = `${base}/everything?q=${q}&language=en&sortBy=publishedAt&from=${from}&pageSize=50&apiKey=${key}`;
     const res = await fetch(url);
     const data = await res.json();
+    if (data.status === "error") {
+      console.error("NewsAPI error:", data.code, data.message);
+      return [];
+    }
     return (data.articles || []) as Article[];
   };
 
@@ -130,12 +138,21 @@ async function fetchNews(industry: string) {
     return terms.some((t) => containsTerm(text, t));
   };
 
-  // Tier 1: India-only, last 2 days (freshest, most locally relevant)
-  let candidates = (await fetchCandidates(2, true)).filter(relevant);
-  // Tier 2: if too little turned up, widen to global sources and a 6-day window
-  if (candidates.length < 4) {
-    candidates = (await fetchCandidates(6, false)).filter(relevant);
+  // Widen the window in stages (3 -> 5 -> 7 days) until there's enough
+  // genuinely relevant coverage, instead of guessing a single fixed window.
+  let candidates: Article[] = [];
+  for (const days of [3, 5, 7]) {
+    candidates = (await fetchCandidates(days)).filter(relevant);
+    if (candidates.length >= 4) break;
   }
+
+  // Among relevant candidates, prefer ones mentioning India — a soft
+  // preference, not a hard requirement, so real relevant news is never
+  // thrown away just for not mentioning a country.
+  candidates.sort((x, y) => {
+    const indiaScore = (a: Article) => (/\bindia\b/i.test(`${a.title} ${a.description || ""}`) ? 0 : 1);
+    return indiaScore(x) - indiaScore(y);
+  });
 
   const seenUrls = new Set<string>();
   const seenTitles = new Set<string>();
